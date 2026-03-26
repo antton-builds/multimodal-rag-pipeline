@@ -78,11 +78,7 @@ Flow:
 6. Start the retrieval agent workflow
 
 ### Supabase Setup
-Enable the pgvector extension in your Supabase project:
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-```
+Run [`schema.sql`](schema.sql) in your Supabase SQL editor to create the table, indexes, and search functions.
 
 ## License
 MIT
