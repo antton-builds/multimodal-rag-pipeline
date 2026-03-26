@@ -1,0 +1,1385 @@
+{
+  "name": "RAG_ingestion_pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/ocr",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer (YOUR MISTRALAI API KEY HERE)"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"mistral-ocr-latest\",\n  \"document\": {\n    \"type\": \"document_url\",\n    \"document_url\": \"data:application/pdf;base64,{{ $json.data }}\"\n  },\n  \"include_image_base64\": true\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        592,
+        2144
+      ],
+      "id": "ba8a5abf-90dc-41cc-b123-7348518589fa",
+      "name": "Mistral OCR",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "pages.images",
+        "include": "selectedOtherFields",
+        "fieldsToInclude": "id, name, pages.index",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        1952,
+        2624
+      ],
+      "id": "a2273268-40aa-42c6-b6ff-acb6f054737f",
+      "name": "Split Out images"
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": false
+        }
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        2272,
+        2096
+      ],
+      "id": "61e0f66b-6cae-497a-bbd2-7b1e347cd6a8",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -336,
+        2064
+      ],
+      "id": "314d15f7-5f96-4499-a025-f1a338fe34ab",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ===============================\n// INPUT\n// ===============================\nconst rawMarkdown = $input.item.json.pages?.markdown || '';\nconst documentId = $input.item.json.id || null;\nconst documentTitle = $input.item.json.name || null;\nconst slideNumber = ($input.item.json.pages?.index ?? 0) + 1;\nconst images = $input.item.json.pages?.images || [];\nconst imageCount = Array.isArray(images) ? images.length : 0;\n\n// ===============================\n// LINK EXTRACTION\n// ===============================\nconst markdownLinkPattern = /\\[([^\\]]+)\\]\\(([^)]+)\\)/g;\nconst extractedLinks = [];\nlet match;\nwhile ((match = markdownLinkPattern.exec(rawMarkdown)) !== null) {\n  extractedLinks.push({ text: match[1], url: match[2] });\n}\n\nconst urlPattern = /(https?:\\/\\/[^\\s]+)/g;\nconst plainUrls = rawMarkdown.match(urlPattern) || [];\nconst emailPattern = /\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b/g;\nconst emails = rawMarkdown.match(emailPattern) || [];\n\nconst allLinks = [\n  ...extractedLinks,\n  ...plainUrls.map(url => ({ text: 'URL', url })),\n  ...emails.map(email => ({ text: 'Email', url: `mailto:${email}` }))\n];\n\n// ===============================\n// CLEAN TEXT\n// ===============================\nlet cleanedText = rawMarkdown\n  .replace(/\\\\([^n])/g, '$1')\n  .replace(/\\\\n/g, '\\n')\n  .replace(/(https?:\\/\\/[^\\s]+)/g, '')\n  .replace(/\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b/g, '')\n  .replace(/!\\[?[^\\]]*\\]?\\([^)]*\\)/g, '')\n  .replace(/!?img[-_]?\\d+\\.(jpeg|jpg|png|gif|webp)/gi, '')\n  .replace(/\\$+/g, '')\n  .replace(/\\\\[a-zA-Z]+\\{([^}]*)\\}/g, '$1')\n  .replace(/[{}]/g, '')\n  .replace(/&lt;/g, '<')\n  .replace(/&gt;/g, '>')\n  .replace(/&amp;/g, '&')\n  .replace(/^#{1,6}\\s+/gm, '')\n  .replace(/(\\*\\*|__)(.*?)\\1/g, '$2')\n  .replace(/(\\*|_)(.*?)\\1/g, '$2')\n  .replace(/\\n{3,}/g, '\\n\\n')\n  .replace(/[ \\t]+/g, ' ')\n  .replace(/^\\s+|\\s+$/gm, '')\n  .trim();\n\ncleanedText = cleanedText\n  .split('\\n')\n  .filter(line => line.length > 0)\n  .join('\\n');\n\n// ===============================\n// FILTER LINKS\n// ===============================\nconst uniqueLinks = Array.from(\n  new Map(allLinks.map(link => [link.url, link])).values()\n).filter(link => {\n  if (!link.url || link.url.trim() === '') return false;\n  if (/\\.(jpeg|jpg|png|gif|webp|bmp|svg|tiff?)$/i.test(link.url)) return false;\n  if (/^!?img[-_]?\\d+$/i.test(link.url)) return false;\n  return (\n    link.url.startsWith('http://') ||\n    link.url.startsWith('https://') ||\n    link.url.startsWith('mailto:')\n  );\n});\n\n// ===============================\n// OUTPUT\n// ===============================\nreturn {\n  json: {\n    document_id: documentId,\n    document_title: documentTitle,\n    slide_number: slideNumber,\n    content_type: \"text\",\n    content: cleanedText,\n    image_count: imageCount,\n    links: uniqueLinks.length > 0 ? uniqueLinks : null\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        1648
+      ],
+      "id": "d1fdd1ad-a744-4114-829b-d310e35056be",
+      "name": "Clean up Markdown"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer (YOUR OPENAI API KEY HERE)"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "text-embedding-3-small"
+            },
+            {
+              "name": "input",
+              "value": "={{ $json.content }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1152,
+        1568
+      ],
+      "id": "4fd4a800-9546-42f8-9b03-8d42a74d05c2",
+      "name": "Embeddings (Markdown)",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer (YOUR MISTRALAI API KEY HERE)"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"pixtral-12b-2409\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"={{ $json.system_prompt }}\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"={{ $json.user_prompt }}\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"image_url\",\n          \"image_url\": {\n            \"url\": \"={{ $json.image_base64 }}\"\n          }\n        }\n      ]\n    }\n  ],\n  \"temperature\": 0.3,\n  \"max_tokens\": 200\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2464,
+        2112
+      ],
+      "id": "50a74ed0-b4eb-4ec4-bf91-8732a51b5a19",
+      "name": "Vision AI",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Extract content from Pixtral response\nconst content = $('Vision AI').item.json.choices[0].message.content;\n\n// Clean markdown formatting from content\nconst cleanedContent = content\n  .replace(/\\*\\*/g, '')           // Remove **bold**\n  .replace(/\\\\n/g, ' ')            // Replace literal \\n with space\n  .replace(/\\n+/g, ' ')            // Replace actual newlines with space\n  .replace(/\\s+/g, ' ')            // Collapse multiple spaces\n  .trim();\n\n// Return only cleaned text\nreturn {\n  json: {\n    content: cleanedContent\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2592,
+        1984
+      ],
+      "id": "7771e0c5-bd2e-4126-970a-08178f06f036",
+      "name": "Content clean up"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer (YOUR OPENAI API KEY HERE)"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "text-embedding-3-small"
+            },
+            {
+              "name": "input",
+              "value": "={{ $json.content }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2800,
+        1920
+      ],
+      "id": "359e1682-5819-44c3-ba2d-a0bc3290479b",
+      "name": "Embeddings Image content",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "eac4856a-74d6-405c-b042-980110031dce",
+              "name": "embedding",
+              "value": "={{ $json.data[0].embedding }}",
+              "type": "array"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1328,
+        1568
+      ],
+      "id": "7aa3ee0e-1b8e-4bc0-be2b-63b0646ae2d8",
+      "name": "Data Clean Up"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "791d7873-372a-456e-b065-5444a9ca8cc4",
+              "name": "slide_number",
+              "value": "={{ $json['pages.index']+1 }}",
+              "type": "number"
+            },
+            {
+              "id": "2d49738d-b9ee-42bf-b2fc-852c21ef64ca",
+              "name": "document_id",
+              "value": "={{ $json.id }}",
+              "type": "string"
+            },
+            {
+              "id": "c3183146-7da9-4101-beec-35c215a2afb1",
+              "name": "image_id",
+              "value": "={{ $json['pages.images'].id }}",
+              "type": "string"
+            },
+            {
+              "id": "80185d97-a0bc-4449-8f00-7474c91aac0e",
+              "name": "content_type",
+              "value": "image",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2304,
+        2464
+      ],
+      "id": "0194e4a9-22e9-44d8-acbc-1ed64e124064",
+      "name": "Image Metadata"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://XXX.supabase.co/storage/v1/object/Images/{{$json.document_id}}/slide_{{$json.slide_number}}/{{$json.image_id}}\n",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "image/jpeg"
+            },
+            {
+              "name": "x-upsert",
+              "value": "true"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "Image_url",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2864,
+        2608
+      ],
+      "id": "8f50cf8e-00f0-4867-a179-99c99b68d7da",
+      "name": "Add image/jpeg to Supabase",
+      "credentials": {
+        "supabaseApi": {
+          "id": "CUjb3GtoR8CoFyW2",
+          "name": "Supabase account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "fe2d89e9-aeb5-47c3-b6e7-ab81b3970ed0",
+              "name": "image_base64",
+              "value": "={{ $json['pages.images'].image_base64.replace(/^data:image\\/\\w+;base64,/, '') }}}}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2192,
+        2624
+      ],
+      "id": "86d17a22-b580-411f-bbea-f54fcf089a8a",
+      "name": "Clean Up base64"
+    },
+    {
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "image_base64",
+        "binaryPropertyName": "Image_url",
+        "options": {
+          "mimeType": "image/jpeg"
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        2432,
+        2624
+      ],
+      "id": "ce444ff7-a492-442a-b96b-0463edb62931",
+      "name": "Base64 to image/jpeg binary file"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "9731ffac-9959-4b50-be23-7f553a34b585",
+              "name": "image_url",
+              "value": "=https://qlgqfxtricooegfohxxc.supabase.co/storage/v1/object/public/{{ $json.Key }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3072,
+        2608
+      ],
+      "id": "afe6243b-bfe3-4942-8c3f-8831aa27db7b",
+      "name": "Built image_url"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "fieldsToMatchString": "document_id",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        3728,
+        2016
+      ],
+      "id": "3a7c8a1e-3692-4b42-ac88-3d233769239e",
+      "name": "Merge context metadata"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "fieldsToMatchString": "document_title",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        3552,
+        1648
+      ],
+      "id": "df4c6140-cbe3-4038-b8c2-36da27a871e5",
+      "name": "Merge context metadata1"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "415bb177-79a5-4da1-81c5-7ad42d8fc63c",
+              "name": "embedding",
+              "value": "={{ $json.data[0].embedding }}",
+              "type": "array"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2960,
+        1920
+      ],
+      "id": "69188592-d741-4c3a-8921-80730c938756",
+      "name": "Embeddings Clean Up"
+    },
+    {
+      "parameters": {
+        "content": "# Document Ingestion & OCR Processing\n\n## What happens here\nEach presentation file is downloaded from Google Drive and processed \nthrough Mistral OCR, which extracts both text and images from every slide.\n\n## Why this matters\nStandard text extraction misses visual content. By using multimodal OCR, \nevery slide is fully captured — including charts, diagrams, and images — \nensuring no information is lost before embedding.\n\n## Output\nOne item per slide, containing:\n### Text\nCleaned markdown content extracted from the slide\n### Images\nBase64-encoded images with metadata, stored separately in Supabase Storage\n",
+        "height": 624,
+        "width": 1108
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -352,
+        2336
+      ],
+      "typeVersion": 1,
+      "id": "43f947b6-38f5-443d-b38b-089fe153419c",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "# Text Processing & Embedding\n\n## What happens here\nSlide markdown is cleaned and normalized before being converted \ninto vector embeddings using OpenAI's embedding model.\n\n## Why this matters\nRaw OCR output contains noise — escape characters, image references, \nand formatting artifacts that reduce embedding quality. Clean text \nproduces more accurate semantic search results.\n\n## Output\nOne embedding vector per slide, stored in Supabase pgvector alongside:\n### Text content\nCleaned and normalized slide text\n### Metadata\nDocument title, slide number, image count, and extracted links\n",
+        "height": 496,
+        "width": 752
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        912,
+        1040
+      ],
+      "typeVersion": 1,
+      "id": "b55ed2fc-fac8-4ad1-a5a3-209aab42469d",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "# Image Processing & Storage\n\n## What happens here\nImages extracted from each slide are split into individual items, \nuploaded to Supabase Storage, and a permanent public URL is generated \nfor each image.\n\n## Why this matters\nStoring images separately from text allows the AI agent to include \nvisual references directly in its responses — giving users access \nto the original slide visuals when relevant.\n\n## Output\nOne database row per image, containing:\n### Image URL\nPermanent public link to the image in Supabase Storage\n### Metadata\nDocument title, slide number, and image ID linking back to the parent slide",
+        "height": 704,
+        "width": 1252
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1936,
+        2768
+      ],
+      "typeVersion": 1,
+      "id": "c7a8e0f9-7e49-416c-9ccf-45f3d1575f69",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "# Vision AI & Image Embedding\n\n## What happens here\nEach image is individually analyzed by Mistral Pixtral vision model, \nwhich generates a concise semantic description optimized for search retrieval.\nDescriptions are then embedded using OpenAI's embedding model.\n\n## Why this matters\nImages cannot be searched directly — by generating text descriptions, \nvisual content becomes semantically searchable alongside slide text. \nA user asking about a graph or chart can retrieve the relevant image \neven without knowing it exists.\n\n## Output\nOne embedding vector per image, stored in Supabase pgvector alongside:\n### Description\nConcise semantic summary of the image content\n### Metadata\nDocument title, slide number, and image ID",
+        "height": 576,
+        "width": 1008
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2064,
+        1536
+      ],
+      "typeVersion": 1,
+      "id": "89d63cb0-01ba-4934-aa61-64cdca7979aa",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "content": "# Document Metadata Enrichment\n## Topic and summary for every document is created as a context for AI Agent that retrieves the embeddings from supabase\n\n## What happens here\n\nBefore slides are stored in the vector database, each presentation \nis automatically analyzed to extract a topic and summary.\n\n## How it works:\n1. The first 3 slides of each presentation are sampled as a \n   representative overview\n2. An LLM generates a topic label and summary based on the content\n3. This metadata is attached to every slide from that presentation\n\n## Why this matters:\nWhen a user asks a question, the AI agent has both slide-level \ndetail and document-level context — improving answer quality \nand relevance significantly.\n",
+        "height": 576,
+        "width": 704
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2032,
+        752
+      ],
+      "typeVersion": 1,
+      "id": "44508f15-8d2d-4326-85c8-5da606c01abe",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "content": "# Image Metadata Merge\n\n## What happens here\nVision AI descriptions and their embeddings are merged with the \ncorresponding image metadata — including the Supabase Storage URL, \nslide number, and document information.\n\n## Why this matters\nEmbeddings alone are not useful without context. By linking each \nvector to its source image URL and slide metadata, the retrieval \nsystem can return not just relevant text but direct visual references \nwith full traceability back to the original presentation.\n\n## Output\nOne complete database row per image, ready for Supabase insertion:\n### Embedding\nVector representation of the image description\n### Image URL\nDirect link to the image in Supabase Storage\n### Metadata\nDocument title, slide number, document topic, and document summary",
+        "height": 640,
+        "width": 560
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        3488,
+        2464
+      ],
+      "typeVersion": 1,
+      "id": "efd7a85a-81ba-4466-9c42-4d81afcdc460",
+      "name": "Sticky Note6"
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        80,
+        2128
+      ],
+      "id": "a8c3cea7-5528-4a52-8e60-ac101b68359f",
+      "name": "Download file",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "I38fFz70QBcZ5mvJ",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "binaryToPropery",
+        "options": {
+          "encoding": "utf8",
+          "keepSource": "json"
+        }
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        272,
+        2128
+      ],
+      "id": "3279a5c2-43b9-4c95-9cb5-09f136ec04d7",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1552,
+        1632
+      ],
+      "id": "0702c3c6-ccaa-495e-b50b-6c0b61a9b451",
+      "name": "Merge embeddings with metadata"
+    },
+    {
+      "parameters": {
+        "resource": "fileFolder",
+        "searchMethod": "query",
+        "queryString": "'119gBh42_R6UMTSgn3VniEVe8ReurrCxq' in parents",
+        "limit": 3,
+        "filter": {},
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -128,
+        2064
+      ],
+      "id": "8bc9977e-fd68-4779-bc5a-d01e73cccc57",
+      "name": "Search files and folders",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "I38fFz70QBcZ5mvJ",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": false
+        }
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        432,
+        2128
+      ],
+      "id": "5edaaf47-8cea-40bb-b985-37047469a9e8",
+      "name": "Loop Over Items1"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2656,
+        2608
+      ],
+      "id": "b8171149-cadf-4096-9a93-c086223a4955",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        592,
+        1920
+      ],
+      "id": "d4108d38-0bbb-44a2-b868-043ac431b8ab",
+      "name": "Merge2"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "pages",
+        "include": "selectedOtherFields",
+        "fieldsToInclude": "id, name",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        736,
+        1920
+      ],
+      "id": "7c60ec41-f1f2-48ea-94ed-118086eadc05",
+      "name": "Split Out"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\n// Ryhmittele document_id mukaan\nconst grouped = {};\nitems.forEach(item => {\n  const docId = item.json.document_id;\n  if (!grouped[docId]) {\n    grouped[docId] = {\n      document_id: docId,\n      document_title: item.json.document_title,\n      markdowns: []\n    };\n  }\n  if (grouped[docId].markdowns.length < 3) {\n    grouped[docId].markdowns.push(item.json.content || '');\n  }\n});\n\n// Yhdistä markdownit ja palauta yksi item per esitelmä\nreturn Object.values(grouped).map(doc => ({\n  json: {\n    document_id: doc.document_id,\n    document_title: doc.document_title,\n    combined_markdown: doc.markdowns.join('\\n\\n---\\n\\n')\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2032,
+        1360
+      ],
+      "id": "7eb2b875-302c-49ef-9d10-80e6cf007bac",
+      "name": "Group: First 3 Slides Per Document"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You will receive slide content from a presentation. Extract the subject and summary.\n\nYou MUST return your response in EXACTLY this format, no exceptions:\n\ndocument_id: {{ $json.document_id }}\ndocument_title: {{ $json.document_title }}\n\n**Topic:** [one line description]\n\n**Summary:** [2-3 sentence summary]\n\nDo not add any other text, headers, or formatting. Do not use bold for document_id or document_title.You are a document and text analyzing specialist. You analyze text content and are able to categorize the subject clearly and concisely. You keep the semantic value in your answers so that retrieving data from a vector database becomes accurate. "
+            },
+            {
+              "content": "=You MUST always include these two fields exactly as provided, no exceptions: document_id: {{ $json.document_id }}\n- document_title: {{ $json.document_title }} \nAnalyze the text content {{ $json.combined_markdown }}, and define the topic with one or two sentences, summary of the topic 3-5 sentences. These answers should help semantic search from a vector database. In your answer give only one topic and summary."
+            },
+            {
+              "content": "={{ $json.combined_markdown }}\n{{ $json.document_id }}\n{{ $json.document_title }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        2224,
+        1360
+      ],
+      "id": "1016434f-b2cd-4c16-8e3a-88a00b0a3111",
+      "name": "Create topic and summary",
+      "credentials": {
+        "openAiApi": {
+          "id": "GUkQ1DTqDVmcQabe",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "869af92c-0de6-45fb-b235-549c0fb486b9",
+              "name": "image_base64",
+              "value": "={{ $json['pages.images'].image_base64 }}",
+              "type": "string"
+            },
+            {
+              "id": "0e324a99-3075-495f-a589-207d63d2b631",
+              "name": "system_prompt",
+              "value": "For each image assess complexity. SIMPLE means icons logos symbols photos of people decorative images or illustrations without data and requires maximum 1 sentence. COMPLEX means graphs charts tables data visualizations or technical diagrams and requires 3-5 sentences covering data trends key values axes and main insights only. Never describe aesthetics colors or symbolic meaning. Focus only on informational content relevant for educational search retrieval.",
+              "type": "string"
+            },
+            {
+              "id": "d645cf02-d49e-43fe-b264-542d750a4b9f",
+              "name": "user_prompt",
+              "value": "Analyze this image and create a concise summary optimized for semantic search retrieval. For graphs, charts, and tables: identify the visualization type, name the key variables or axes, and describe the main trend or insight the data shows. For all other images: one sentence describing what it is.",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2080,
+        2096
+      ],
+      "id": "865c8be3-6234-4c27-821a-b2501aa5ad2f",
+      "name": "LLM Prompt + Image_base64"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nreturn items.map(item => {\n  const raw = item.json.output?.[0]?.content?.[0]?.text || '';\n  const text = String(raw).replace(/\\\\n/g, '\\n');\n\n  const idMatch = text.match(/\\*?\\*?document_id\\*?\\*?[:\\s]+(.+?)(?=\\n|$)/i);\n  const titleMatch = text.match(/\\*?\\*?document_title\\*?\\*?[:\\s]+(.+?)(?=\\n|$)/i);\n  const topicMatch = text.match(/\\*?\\*?(?:Subject|Topic)\\*?\\*?[:\\s]+(.+?)(?=\\n\\n|\\n\\*|$)/si);\n  const summaryMatch = text.match(/\\*?\\*?Summary\\*?\\*?[:\\s]+(.+?)$/si);\n\n  return {\n    json: {\n      document_id: idMatch ? idMatch[1].trim() : null,\n      document_title: titleMatch ? titleMatch[1].trim() : null,\n      document_topic: topicMatch ? topicMatch[1].trim() : null,\n      document_summary: summaryMatch ? summaryMatch[1].trim() : null\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2560,
+        1360
+      ],
+      "id": "a42d2bbb-9f9c-4632-9f63-bb5a79961f48",
+      "name": "Parse LLM: Extract Document Metadata"
+    },
+    {
+      "parameters": {
+        "content": "# Slide Metadata Merge\n\n## What happens here\nCleaned slide text and embeddings are merged with document-level \nmetadata — topic and summary generated by the LLM in the enrichment phase.\n\n## Why this matters\nWithout this merge, each slide would be stored with text content only. \nBy attaching document-level context to every slide, the AI agent can \nanswer questions with both slide-specific detail and a broader \nunderstanding of where that information comes from.\n\n## Output\nOne complete database row per slide, ready for Supabase insertion:\n### Embedding\nVector representation of the cleaned slide text\n### Slide content\nCleaned and normalized markdown text\n### Document context\nTopic label and summary inherited from the parent presentation",
+        "height": 608,
+        "width": 496
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        3376,
+        1024
+      ],
+      "typeVersion": 1,
+      "id": "a937dbd9-674f-4f76-a025-07644f6d78f4",
+      "name": "Sticky Note7"
+    },
+    {
+      "parameters": {
+        "tableId": "slide_rag",
+        "dataToSend": "autoMapInputData"
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        4016,
+        1936
+      ],
+      "id": "712ed6ff-2877-44b1-ae60-e98a804db981",
+      "name": "Supabase: Insert Slide Row",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": false,
+      "credentials": {
+        "supabaseApi": {
+          "id": "CUjb3GtoR8CoFyW2",
+          "name": "Supabase account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "content": "# Vector Storage — Supabase Insert\n\n## What happens here\nEach fully enriched slide item is inserted as a row into the \nSupabase slide_rag table, including the embedding vector, \ntext content, image metadata, and document context.\n\n## Why this matters\nThis is the final step of the ingestion pipeline. Once inserted, \nslides become immediately searchable via pgvector cosine similarity — \nmaking all processed content available to the retrieval agent.\n\n## Output\nOne permanent row per slide in the slide_rag table, containing:\n### Embedding\n1536-dimension vector for semantic similarity search\n### Content\nCleaned slide text and image URLs\n### Metadata\nDocument title, topic, summary, slide number, and content type",
+        "height": 592,
+        "width": 592
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        4192,
+        1728
+      ],
+      "typeVersion": 1,
+      "id": "6578d099-5ba0-49d1-8f8c-a9aa696799fe",
+      "name": "Sticky Note8"
+    },
+    {
+      "parameters": {
+        "content": "# RAG Ingestion Pipeline — Presentation Knowledge Base\n\n## Purpose\nThis workflow processes presentation files from Google Drive into a \nfully searchable multimodal knowledge base. Both text and images are \nextracted, analyzed, and stored as vector embeddings in Supabase — \nmaking every slide retrievable through semantic search.\n\n## Why multimodal matters\nMost RAG pipelines index text only. This pipeline captures the full \ncontent of each slide — including charts, diagrams, and images — \nby combining OCR, vision AI, and embedding models. This means users \ncan retrieve relevant visuals alongside text when querying the knowledge base.\n\n## Pipeline overview\n1. Files are fetched from Google Drive and processed through Mistral OCR\n2. Document metadata (topic + summary) is generated by an LLM\n3. Slide text is cleaned, embedded, and enriched with document context\n4. Images are extracted, described by vision AI, and embedded separately\n5. All vectors and image files are stored in Supabase\n\n## Extensibility\nThis pipeline is built for presentations but the architecture supports \nany document type. Switching to PDFs, Word documents, or web pages \nrequires only changes to the ingestion and chunking logic — \nthe embedding, storage, and retrieval layers remain unchanged.\n\n## Stack\n- **OCR:** Mistral OCR (text + image extraction)\n- **Vision AI:** Mistral Pixtral (image descriptions)\n- **Embeddings:** OpenAI (text + images)\n- **Vector store:** Supabase pgvector\n- **Image storage:** Supabase Storage bucket\n- **Orchestration:** n8n",
+        "height": 880,
+        "width": 1024
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -1104,
+        896
+      ],
+      "typeVersion": 1,
+      "id": "c48760f9-275f-4f89-a547-54f411ffd0df",
+      "name": "Sticky Note9"
+    },
+    {
+      "parameters": {
+        "amount": 4
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        736,
+        2144
+      ],
+      "id": "18b590d5-5e59-4a89-8c61-4f07d19d011f",
+      "name": "Wait",
+      "webhookId": "f386894d-2348-4e68-8cac-71de2191eca6"
+    },
+    {
+      "parameters": {
+        "amount": 1
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2640,
+        2112
+      ],
+      "id": "661987bb-9c2a-460a-9192-f1d1a3ac825e",
+      "name": "Wait1",
+      "webhookId": "15a5b73d-636c-4a27-af80-1e22f6e19f54"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {
+          "includeUnpaired": true
+        }
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        3216,
+        2208
+      ],
+      "id": "bed19b6d-454f-4f54-8aa9-01eeb8731ba8",
+      "name": "Content + embdeddings"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        3216,
+        2352
+      ],
+      "id": "ee7b1e96-37f0-4a32-ae35-68af31643860",
+      "name": "Image metadata + image_url"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        3392,
+        2272
+      ],
+      "id": "2bf2012f-7a4e-4c27-9af9-b151214cbcff",
+      "name": "All image metadata"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Mistral OCR": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out images": {
+      "main": [
+        [
+          {
+            "node": "LLM Prompt + Image_base64",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Clean Up base64",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Image Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "Content clean up",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Vision AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Search files and folders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean up Markdown": {
+      "main": [
+        [
+          {
+            "node": "Embeddings (Markdown)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge embeddings with metadata",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Embeddings (Markdown)": {
+      "main": [
+        [
+          {
+            "node": "Data Clean Up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vision AI": {
+      "main": [
+        [
+          {
+            "node": "Wait1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Content clean up": {
+      "main": [
+        [
+          {
+            "node": "Embeddings Image content",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Content + embdeddings",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Embeddings Image content": {
+      "main": [
+        [
+          {
+            "node": "Embeddings Clean Up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Data Clean Up": {
+      "main": [
+        [
+          {
+            "node": "Merge embeddings with metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Image Metadata": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Image metadata + image_url",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean Up base64": {
+      "main": [
+        [
+          {
+            "node": "Base64 to image/jpeg binary file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Base64 to image/jpeg binary file": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Add image/jpeg to Supabase": {
+      "main": [
+        [
+          {
+            "node": "Built image_url",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Built image_url": {
+      "main": [
+        [
+          {
+            "node": "Image metadata + image_url",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge context metadata": {
+      "main": [
+        [
+          {
+            "node": "Supabase: Insert Slide Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge context metadata1": {
+      "main": [
+        [
+          {
+            "node": "Supabase: Insert Slide Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings Clean Up": {
+      "main": [
+        [
+          {
+            "node": "Content + embdeddings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download file": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge embeddings with metadata": {
+      "main": [
+        [
+          {
+            "node": "Merge context metadata1",
+            "type": "main",
+            "index": 1
+          },
+          {
+            "node": "Group: First 3 Slides Per Document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search files and folders": {
+      "main": [
+        [
+          {
+            "node": "Download file",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items1": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Mistral OCR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Add image/jpeg to Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge2": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out": {
+      "main": [
+        [
+          {
+            "node": "Clean up Markdown",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Split Out images",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Group: First 3 Slides Per Document": {
+      "main": [
+        [
+          {
+            "node": "Create topic and summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create topic and summary": {
+      "main": [
+        [
+          {
+            "node": "Parse LLM: Extract Document Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Prompt + Image_base64": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LLM: Extract Document Metadata": {
+      "main": [
+        [
+          {
+            "node": "Merge context metadata1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge context metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait1": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Content + embdeddings": {
+      "main": [
+        [
+          {
+            "node": "All image metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Image metadata + image_url": {
+      "main": [
+        [
+          {
+            "node": "All image metadata",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "All image metadata": {
+      "main": [
+        [
+          {
+            "node": "Merge context metadata",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "6a8026c2-2bad-4dd1-8e1d-b761db7f5d8d",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+  },
+  "id": "rOmCBIhHJ5eNdfkQ",
+  "tags": []
+}

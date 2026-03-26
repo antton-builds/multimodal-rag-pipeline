@@ -1,0 +1,342 @@
+{
+  "name": "RAG Retrieval Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.user_message }}",
+        "options": {
+          "systemMessage": "You are a knowledgeable marketing and SEO assistant with access to a curated knowledge base of presentation materials.\n\n## Core behavior\n- Always respond in the same language the user is writing in\n- Base your answers on the retrieved slide content provided to you\n- Be specific and actionable — the user wants practical insights, not disclaimers\n- Synthesize information from multiple slides into one coherent answer\n\n## Source citation\n- Always cite sources as: \"[document_title], Slide [slide_number] exactly in their original form\"\n- Never refer to a source as just \"Slide X\" without the presentation name\n- When multiple slides support the same point, cite all of them\n\n## Using retrieved context\n- Even if the context is from a specific industry, extract the transferable general principle\n- Example: automobile advertising elasticity data → general principle about budget optimization\n- If context is partially relevant, use what IS available rather than saying information is missing\n- Prioritize slides with higher similarity scores when constructing your answer\n- If genuinely no relevant information exists in the context, say clearly what you do know and what additional information would be needed\n\n## Images\n- Always include the exact image URL as a clickable link when available\n- Format: [View image](url)\n- Never describe an image without including its URL if one exists\n- Never modify, shorten, or alter image URLs in any way\n- Copy image URLs exactly as they appear in the context, character by character\n- Format: [View image](exact_url_here)\n- If you are unsure about a URL, omit it rather than guessing\n\n\n## Answer structure\nFor complex questions use this structure:\n1. Direct answer to the question\n2. Supporting evidence from slides with citations and images where available\n3. Practical recommendation\n\nFor simple questions: answer concisely in 2-3 sentences with citations.\n\n## What you must never do\n- Never say \"the slides do not contain information\" if there is partially relevant data\n- Never cite a slide without its document title\n- Never speculate beyond what the context supports without flagging it clearly\n- Never omit an image URL if one is available for a cited slide\n- Never modify document titles — use them exactly as provided\n\n## Formatting rules\n- Use actual line breaks between sections — never write \\n as text\n- Do not wrap citation titles in square brackets inside quotes — write them as: Marketing Mix Analysis- Presentation.pptx, Slide 14\n- Do not add quotation marks around citation titles\n- Keep formatting clean and readable for a chat interface"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1408,
+        272
+      ],
+      "id": "be10fbc7-29c1-483d-8495-fba743ea90ab",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "chatId": "7338155737",
+        "text": "={{ $json.output }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1872,
+        288
+      ],
+      "id": "000e6805-101a-4873-8773-adc66cbec601",
+      "name": "Send a text message",
+      "webhookId": "d9fb0de6-23bf-43f5-8607-fed2022d7c5d",
+      "credentials": {
+        "telegramApi": {
+          "id": "f79xwafNm269b4He",
+          "name": "Telegram_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -272,
+        496
+      ],
+      "id": "b78f9bbe-f560-4084-b8c2-101700b25627",
+      "name": "Telegram Trigger",
+      "webhookId": "153042c1-e90e-41c8-afb5-7f5da6db3a24",
+      "credentials": {
+        "telegramApi": {
+          "id": "f79xwafNm269b4He",
+          "name": "Telegram_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        1264,
+        528
+      ],
+      "id": "54385e18-7883-483c-bbaf-f62236fd67c4",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "GUkQ1DTqDVmcQabe",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  id,\n  document_id,\n  document_title,\n  document_topic,\n  document_summary,\n  slide_number,\n  content_type,\n  image_id,\n  image_url,\n  content,\n  1 - (embedding <=> $1::vector) as similarity\nFROM slide_rag\nWHERE embedding IS NOT NULL\n  AND 1 - (embedding <=> $1::vector) > 0.25\nORDER BY embedding <=> $1::vector\nLIMIT 5;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify ($json.data[0].embedding) }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        816,
+        496
+      ],
+      "id": "e0aae780-26ad-4fdb-975b-7231730a9686",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "roXIU7hWPR9boe7r",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\n// Hae text output nodesta\nconst text = input.output[0].content[0].text;\n\n// Split rivit ja puhdista\nconst lines = text\n  .split('\\n')\n  .map(line => line.trim())\n  .filter(line => line.length > 0);\n\n// Parse queryt (poista numerot ja välimerkit alusta)\nconst queries = lines.map(line => {\n  // Poista \"1. \", \"2. \", \"3. \" ja muut numerot\n  return line.replace(/^\\d+\\.\\s*/, '').trim();\n});\n\n// Tallenna alkuperäinen kysymys\nconst originalQuestion = $(\"Telegram Trigger\").first().json.message?.text || \"unknown\";\n\n// Lisää alkuperäinen kysymys queryihin\nqueries.push(originalQuestion);\n\n// Palauta 3 erillistä itemiä (2 LLM:n generoitua + alkuperäinen)\nreturn queries.map((query, index) => ({\n  json: {\n    query: query,\n    query_index: index + 1,\n    original_question: originalQuestion\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        304,
+        496
+      ],
+      "id": "3d2e9fbf-763a-4479-9229-fc303288f888",
+      "name": "Query Expansion: Parse & Add Original"
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = $input.all();\nlet originalQuestion = \"unknown\";\ntry {\n  originalQuestion = $(\"Telegram Trigger\").first().json.message?.text || \n                     results[0]?.json?.original_question || \n                     \"unknown\";\n} catch (e) {\n  originalQuestion = \"unknown\";\n}\n\nconst uniqueMap = new Map();\nresults.forEach(item => {\n  const key = `${item.json.document_id}_${item.json.slide_number}`;\n  const existing = uniqueMap.get(key);\n  if (!existing || item.json.similarity > existing.similarity) {\n    uniqueMap.set(key, item.json);\n  }\n});\n\nconst uniqueResults = Array.from(uniqueMap.values())\n  .sort((a, b) => b.similarity - a.similarity);\n\nconst documentSummaries = new Map();\nuniqueResults.forEach(slide => {\n  if (!documentSummaries.has(slide.document_id)) {\n    documentSummaries.set(slide.document_id, {\n      title: slide.document_title,\n      topic: slide.document_topic,\n      summary: slide.document_summary\n    });\n  }\n});\n\nconst documentContext = Array.from(documentSummaries.values())\n  .map(doc => `Document: ${doc.title}\nTopic: ${doc.topic}\nSummary: ${doc.summary}`).join('\\n\\n');\n\nconst slidesText = uniqueResults.map(slide => {\n  let slideText = `Source: ${slide.document_title}, Slide ${slide.slide_number}\nRelevance: ${slide.similarity.toFixed(2)}\nContent: ${slide.content.replace(/\\\\n/g, '\\n')}`;\n  \n  if (slide.image_url) {\n    slideText += `\\nImage: ${slide.image_url}`;\n  }\n  \n  return slideText;\n}).join('\\n---\\n');\n\nconst userMessage = `User question: ${originalQuestion}\n\nDOCUMENT CONTEXT (use this to understand the broader topic of each presentation):\n${documentContext}\n\nRETRIEVED SLIDES (use these as your primary source):\n${slidesText}\n\nTASK: Based on the slides and document context above, provide ONE unified and actionable answer.\n- Cite slides as: [document_title], Slide [slide_number]\n- If a slide has an Image URL, include it in your response as a relevant visual reference\n- Use document summaries to provide broader context when relevant\n- Respond in the same language as the user's question`;\n\nreturn [{\n  json: {\n    original_question: originalQuestion,\n    slides: uniqueResults,\n    slide_count: uniqueResults.length,\n    user_message: userMessage\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1056,
+        384
+      ],
+      "id": "d5d5f7c1-ec6d-4d77-99ed-73074b861c62",
+      "name": "Deduplicate & Build User Message"
+    },
+    {
+      "parameters": {
+        "content": "## RAG Retrieval Agent — Telegram Interface\n\n### This workflow handles incoming Telegram messages and retrieves relevant knowledge from a vector database of presentation slides.\n\nFlow:\n1. Telegram Trigger receives user question\n2. Query Expansion LLM generates 2 additional search queries\n3. Code node parses LLM output and appends original question → 3 queries total\n4. All 3 queries are embedded\n5. All 3 queries are searched against Supabase pgvector\n6. Code forms a coherent user's message for LLM\n7. AI Agent synthesizes a grounded answer with slide citations and image URLs\n8. Response is sent back to Telegram\n",
+        "height": 432,
+        "width": 544
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -48,
+        -32
+      ],
+      "typeVersion": 1,
+      "id": "0432fb8b-afb8-489f-9298-e67f0f59d38f",
+      "name": "Sticky Note5"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a query expansion specialist for a document retrieval system.\n\nYour task: Generate 2 different search query variations from the user's question.\nEach variation should:\n- Capture different aspects or phrasings of the question\n- Use relevant keywords and synonyms\n- Be suitable for semantic search"
+            },
+            {
+              "content": "=Original question: {{ $json.message.text }}\n\nGenerate 3 search query variations."
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        -48,
+        496
+      ],
+      "id": "2b153edf-011f-417b-95c2-880e980f52b9",
+      "name": "Query expansion by LLM",
+      "credentials": {
+        "openAiApi": {
+          "id": "GUkQ1DTqDVmcQabe",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer (YOUR OPENAI API KEY HERE)"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "text-embedding-3-small"
+            },
+            {
+              "name": "input",
+              "value": "={{ $json.query }}"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 0
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        560,
+        496
+      ],
+      "id": "684e30ab-7921-4728-8000-abf1c209b6a7",
+      "name": "Embeddings"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Query expansion by LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "Deduplicate & Build User Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Expansion: Parse & Add Original": {
+      "main": [
+        [
+          {
+            "node": "Embeddings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deduplicate & Build User Message": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query expansion by LLM": {
+      "main": [
+        [
+          {
+            "node": "Query Expansion: Parse & Add Original",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "a449da4d-2e2c-474d-a7b3-944090cbc528",
+  "meta": {
+  },
+  "id": "rgs6QKp7vKmR6NkG",
+  "tags": []
+}
